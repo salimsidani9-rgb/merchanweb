@@ -442,300 +442,100 @@ function findUpcScanHits(raw){
 function normalizeTextProbe(v){
   return String(v||'').trim().toUpperCase().replace(/[^A-Z0-9]+/g,'');
 }
-function textContainsEitherWay(scanned, target){
-  const s = normalizeTextProbe(scanned);
-  const t = normalizeTextProbe(target);
-  if(!s || !t) return false;
-  return s.includes(t) || t.includes(s);
-}
-function textMatchScore(scanned, target){
-  const s = normalizeTextProbe(scanned);
-  const t = normalizeTextProbe(target);
-  if(!s || !t) return -1;
-  if(s===t) return 10000;
-  if(s.includes(t)) return 9000 + (t.length*10) - Math.max(0,s.length-t.length);
-  if(t.includes(s)) return 7000 + (s.length*10) - Math.max(0,t.length-s.length);
-  let best = -1;
-  const minLen=Math.min(s.length, t.length);
-  for(let len=minLen; len>=4; len--){
-    for(let i=0;i+len<=s.length;i++){
-      const sub=s.slice(i,i+len);
-      if(t.includes(sub) || sub.includes(t)){
-        best=Math.max(best, len*100 - i);
-      }
-    }
-    if(best>=0) break;
-  }
-  return best;
-}
-function normalizeCodeStrict(raw){
-  return String(raw||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+function normalizeCodeStrict(v){
+  return String(v||'').toUpperCase().replace(/[^A-Z0-9]+/g,'');
 }
 function tokenizeAlnum(raw){
   return String(raw||'').toUpperCase().match(/[A-Z0-9]+/g) || [];
 }
-function findLikelyFixtureCandidate(fullText){
-  const cleaned = normalizeCodeStrict(fullText);
-  if(!cleaned) return null;
-  const matches = cleaned.match(/[A-Z]{3}[0-9]{4,16}/g) || [];
-  if(!matches.length) return null;
-  matches.sort((a,b)=>b.length-a.length);
-  return matches[0];
-}
-function buildCurrentWallFixtureCodes(){
-  const out = [];
-  const add = code => {
-    const c = normalizeCodeStrict(code);
-    if(c && /^[A-Z]{3}[0-9]{4,16}$/.test(c) && !out.includes(c)) out.push(c);
-  };
-  const zones = getZones(state.wallFolder);
-  zones.forEach(z=>add(trayCodeFor(state.wallFolder, z.id) || z.fixtureCode || z.code || z.partCode));
-  const mat = getMateriel(state.wallFolder);
-  mat.forEach(m=>add(m.partCode));
-  return out;
-}
-
-function currentWallUsesLegacyHiddenParts(){
-  const wf = String(state.wallFolder||'').toLowerCase();
-  return wf === 'mur1' || wf === 'sdm_sl_10_feet' || wf === 'sdm sl 10 feet' || wf.includes('sdm');
-}
-function buildCurrentHiddenPartCodes(){
-  if(!currentWallUsesLegacyHiddenParts()) return [];
-  return Object.keys(APK_HIDDEN_PARTS||{});
-}
-
 function buildFixturePrefixIndex(codes){
-  const byPrefix = {};
-  codes.forEach(code=>{
-    const c = normalizeCodeStrict(code);
+  const byPrefix={};
+  (codes||[]).forEach(code=>{
+    const c=normalizeCodeStrict(code);
     if(!/^[A-Z]{3}[0-9]{4,16}$/.test(c)) return;
-    const prefix = c.slice(0,3);
-    if(!byPrefix[prefix]) byPrefix[prefix] = [];
+    const prefix=c.slice(0,3);
+    if(!byPrefix[prefix]) byPrefix[prefix]=[];
     if(!byPrefix[prefix].includes(c)) byPrefix[prefix].push(c);
   });
-  Object.keys(byPrefix).forEach(prefix=>{
-    byPrefix[prefix].sort((a,b)=>b.length-a.length);
-  });
+  Object.keys(byPrefix).forEach(p=>byPrefix[p].sort((a,b)=>b.length-a.length));
   return byPrefix;
 }
-
-const OCR_CONFUSION_GROUPS = ['0OQD','1IL','2Z','5S','6G9','8B','4A','7T','MN','UVY','CGO'];
-const OCR_SKELETON_MAP = {
-  '0':'0','O':'0','Q':'0','D':'0',
-  '1':'1','I':'1','L':'1',
-  '2':'2','Z':'2',
-  '4':'4','A':'4',
-  '5':'5','S':'5',
-  '6':'6','G':'6','9':'6',
-  '7':'7','T':'7',
-  '8':'8','B':'8'
-};
-function ocrSkeleton(raw){
-  return normalizeCodeStrict(raw).split('').map(ch=>OCR_SKELETON_MAP[ch] || ch).join('');
-}
-function ocrSubstitutionCost(a,b){
-  if(a===b) return 0;
-  if((OCR_SKELETON_MAP[a]||a) === (OCR_SKELETON_MAP[b]||b)) return 0.08;
-  for(const g of OCR_CONFUSION_GROUPS){ if(g.includes(a) && g.includes(b)) return 0.16; }
-  const aDigit=/[0-9]/.test(a), bDigit=/[0-9]/.test(b);
-  if(aDigit && bDigit) return 0.56;
-  if(!aDigit && !bDigit) return 0.76;
-  return 0.9;
-}
-function weightedEditDistanceOcr(a,b){
-  const s=normalizeCodeStrict(a), t=normalizeCodeStrict(b);
-  const m=s.length, n=t.length;
-  if(!m) return n;
-  if(!n) return m;
-  const dp=Array.from({length:m+1},()=>Array(n+1).fill(0));
-  for(let i=0;i<=m;i++) dp[i][0]=i*0.92;
-  for(let j=0;j<=n;j++) dp[0][j]=j*0.92;
-  for(let i=1;i<=m;i++){
-    for(let j=1;j<=n;j++){
-      const sub=dp[i-1][j-1]+ocrSubstitutionCost(s[i-1], t[j-1]);
-      const del=dp[i-1][j]+0.90;
-      const ins=dp[i][j-1]+0.90;
-      dp[i][j]=Math.min(sub, del, ins);
-    }
-  }
-  return dp[m][n];
-}
-
-function buildOcrHaystacks(rawText){
-  const raw=String(rawText||'');
-  const tokens=tokenizeAlnum(raw).map(normalizeCodeStrict).filter(Boolean);
-  const cleaned=normalizeCodeStrict(raw);
-  const set=new Set(tokens);
-  if(cleaned) set.add(cleaned);
-  tokens.forEach(tok=>{
-    if(tok.length>=5){
-      for(let i=0;i<tok.length;i+=Math.max(1, Math.floor(tok.length/4))){
-        set.add(tok.slice(i));
-      }
-    }
+function findBestFixtureCodeInTextAndroidWeb(text){
+  const cleaned=normalizeCodeStrict(text);
+  if(!cleaned) return null;
+  const tokens = cleaned.match(/[A-Z]{3}[0-9]{4,16}/g) || [];
+  if(!tokens.length) return null;
+  const byPrefix=buildFixturePrefixIndex(Object.values(APK_TRAY_CODES||{}));
+  let best=null;
+  tokens.forEach(token=>{
+    if(token.length<7) return;
+    const prefix=token.slice(0,3);
+    const candidates=byPrefix[prefix] || [];
+    const found=candidates.find(code=>token.includes(code));
+    if(found && (!best || found.length>best.length)) best=found;
   });
-  return Array.from(set).filter(Boolean);
-}
-function generatePrefixWindows(rawText, knownCodes){
-  const cleaned=normalizeCodeStrict(rawText);
-  if(!cleaned) return [];
-  const prefixes=Array.from(new Set((knownCodes||[]).map(c=>normalizeCodeStrict(c).slice(0,3)).filter(p=>p.length===3)));
-  const lengths=Array.from(new Set((knownCodes||[]).map(c=>normalizeCodeStrict(c).length).filter(n=>n>=2))).sort((a,b)=>a-b);
-  const out=[];
-  prefixes.forEach(prefix=>{
-    let idx=cleaned.indexOf(prefix);
-    while(idx!==-1){
-      lengths.forEach(L=>{
-        for(const extra of [-2,-1,0,1,2,3]){
-          const len=L+extra;
-          if(len<4) continue;
-          const sub=cleaned.slice(idx, idx+len);
-          if(sub.length>=4) out.push(sub);
-        }
-      });
-      idx=cleaned.indexOf(prefix, idx+1);
-    }
-  });
-  out.push(cleaned);
-  return Array.from(new Set(out));
-}
-
-function scoreKnownCodeAgainstHaystack(codeRaw, hayRaw){
-  const code=normalizeCodeStrict(codeRaw), hay=normalizeCodeStrict(hayRaw);
-  if(!code || !hay || hay.length < Math.max(2, code.length-5)) return -1e9;
-  const codeSk=ocrSkeleton(code), haySk=ocrSkeleton(hay);
-  if(hay.includes(code)){
-    const idx=hay.indexOf(code);
-    return 26000 + code.length*180 - idx*3 - Math.max(0, hay.length-code.length)*8;
-  }
-  if(haySk.includes(codeSk)){
-    const idx=haySk.indexOf(codeSk);
-    return 24800 + code.length*175 - idx*3 - Math.max(0, haySk.length-codeSk.length)*6;
-  }
-  let best=-1e9;
-  const minLen=Math.max(2, code.length-5);
-  const maxLen=Math.min(hay.length, code.length+5);
-  const prefix=code.slice(0, Math.min(3, code.length));
-  const prefixSk=ocrSkeleton(prefix);
-  for(let start=0; start<hay.length; start++){
-    for(let L=minLen; L<=maxLen && start+L<=hay.length; L++){
-      const sub=hay.slice(start, start+L);
-      const subSk=haySk.slice(start, start+L);
-      const dist=Math.min(weightedEditDistanceOcr(code, sub), weightedEditDistanceOcr(codeSk, subSk));
-      const prefixDist=Math.min(
-        weightedEditDistanceOcr(prefix, sub.slice(0, Math.min(prefix.length, sub.length))),
-        weightedEditDistanceOcr(prefixSk, subSk.slice(0, Math.min(prefixSk.length, subSk.length)))
-      );
-      const threshold = code.length>=12 ? 4.6 : code.length>=8 ? 3.8 : code.length>=6 ? 3.0 : 2.4;
-      if(dist > threshold) continue;
-      if(prefix.length>=3 && prefixDist > 1.55) continue;
-      let score = 17000 + code.length*178 - dist*680 - start*3 - Math.abs(sub.length-code.length)*95 - prefixDist*230;
-      if(sub.startsWith(prefix) || subSk.startsWith(prefixSk)) score += 620;
-      if(code.length>=7 && sub.length>=7 && (sub[3]===code[3] || subSk[3]===codeSk[3])) score += 150;
-      if(subSk.includes(codeSk)) score += 420;
-      if(score > best) best = score;
-    }
-  }
   return best;
 }
-
-
-function findBestKnownCodeUltraWeb(knownCodesRaw, rawText){
-  const known = Array.from(new Set((knownCodesRaw||[]).map(v=>normalizeCodeStrict(v)).filter(v=>v.length>=2 && v.length<=24)));
+function findBestMaterialCodeInTextAndroidWeb(text){
+  const raw=String(text||'').toUpperCase();
+  const scanned=normalizeCodeStrict(raw);
+  if(!scanned) return null;
+  const items=getMateriel(state.wallFolder);
+  if(!items.length) return null;
+  const known=Array.from(new Set(items.map(it=>normalizeCodeStrict(it.partCode)).filter(v=>v.length>=2 && v.length<=10)));
   if(!known.length) return null;
-  const rawHay = [...buildOcrHaystacks(rawText), ...generatePrefixWindows(rawText, known)];
-  const haystacks = Array.from(new Set([
-    ...rawHay,
-    ...rawHay.map(ocrSkeleton)
-  ])).filter(Boolean);
-  if(!haystacks.length) return null;
-  let bestCode=null, bestScore=-1e9;
-  const sortedKnown=known.slice().sort((a,b)=>b.length-a.length);
-  for(const code of sortedKnown){
-    for(const hay of haystacks){
-      const score=scoreKnownCodeAgainstHaystack(code, hay);
-      if(score>bestScore){ bestScore=score; bestCode=code; }
-    }
-  }
-  return bestScore >= 12000 ? bestCode : null;
-}
-
-function findBestKnownCodeApproxWeb(knownCodesRaw, rawText){
-  return findBestKnownCodeUltraWeb(knownCodesRaw, rawText);
-}
-function findBestFixtureCodeInTextWeb(codeOrText){
-
-  const scanned = normalizeCodeStrict(codeOrText);
-  if(scanned){
-    const tokens = scanned.match(/[A-Z]{3}[0-9]{4,16}/g) || [];
-    if(tokens.length){
-      const byPrefix = buildFixturePrefixIndex(buildCurrentWallFixtureCodes());
-      let best = null;
-      tokens.forEach(token=>{
-        if(token.length < 7) return;
-        const candidates = byPrefix[token.slice(0,3)] || [];
-        const found = candidates.find(code=>token.includes(code));
-        if(found && (!best || found.length > best.length)) best = found;
-      });
-      if(best) return best;
-    }
-  }
-  return findBestKnownCodeApproxWeb(buildCurrentWallFixtureCodes(), codeOrText);
-}
-
-function findBestKnownCodeInTextInternalWeb(knownCodesRaw, scannedNormalized, rawText){
-  const known = Array.from(new Set((knownCodesRaw||[])
-    .map(v=>normalizeCodeStrict(v))
-    .filter(v=>v.length >= 2 && v.length <= 24)));
-  if(!known.length) return null;
-  const tokens = rawText ? tokenizeAlnum(rawText) : [];
-  const sortedKnown = known.slice().sort((a,b)=>b.length-a.length);
-  const bestIn = haystackRaw => {
-    const h = normalizeCodeStrict(haystackRaw);
+  const tokens=tokenizeAlnum(raw);
+  const sorted=known.slice().sort((a,b)=>b.length-a.length);
+  const bestIn=(hay)=>{
+    const h=normalizeCodeStrict(hay);
     if(!h) return null;
-    const hs = ocrSkeleton(h);
-    for(const code of sortedKnown){
-      if(h.includes(code) || hs.includes(ocrSkeleton(code))){
-        const isNumeric = /^[0-9]+$/.test(code);
-        if(isNumeric && code.length <= 4){
-          if(!(h.startsWith(code) || h.endsWith(code) || hs.startsWith(ocrSkeleton(code)) || hs.endsWith(ocrSkeleton(code)))) continue;
-        }
-        return code;
+    for(const code of sorted){
+      if(!h.includes(code)) continue;
+      const isNumeric=/^[0-9]+$/.test(code);
+      if(isNumeric && code.length<=4){
+        if(!(h.startsWith(code) || h.endsWith(code))) continue;
       }
+      return code;
     }
     return null;
   };
-  let best = null;
+  let best=null;
   for(const token of tokens){
-    const found = bestIn(token);
-    if(found && (!best || found.length > best.length)) best = found;
+    const found=bestIn(token);
+    if(found && (!best || found.length>best.length)) best=found;
   }
   if(best) return best;
-  const exact = bestIn(scannedNormalized);
-  if(exact) return exact;
-  return findBestKnownCodeApproxWeb(known, rawText || scannedNormalized || '');
+  return bestIn(scanned);
 }
-
-function findBestWallMaterialCodeInTextWeb(text){
-  const raw = String(text||'').toUpperCase();
-  const scanned = normalizeCodeStrict(raw);
-  if(!scanned) return null;
-  const items = getMateriel(state.wallFolder);
-  if(!items.length) return null;
-  const known=items.map(it=>it.partCode);
-  return findBestKnownCodeInTextInternalWeb(known, scanned, raw) || findBestKnownCodeUltraWeb(known, raw);
+function findBestHiddenPartCodeAndroidWeb(text){
+  if(!(state.wallFolder||'').toLowerCase().includes('sdm')) return null;
+  if(typeof APK_HIDDEN_PARTS==='undefined' || !APK_HIDDEN_PARTS) return null;
+  const partCodes=Object.keys(APK_HIDDEN_PARTS).map(normalizeCodeStrict).filter(v=>/^[A-Z]{3}[0-9]{4,16}$/.test(v));
+  if(!partCodes.length) return null;
+  const cleaned=normalizeCodeStrict(text);
+  if(!cleaned) return null;
+  const tokens = cleaned.match(/[A-Z]{3}[0-9]{4,16}/g) || [];
+  if(!tokens.length) return null;
+  const byPrefix=buildFixturePrefixIndex(partCodes);
+  let best=null;
+  tokens.forEach(token=>{
+    if(token.length<7) return;
+    const prefix=token.slice(0,3);
+    const candidates=byPrefix[prefix] || [];
+    const found=candidates.find(code=>token.includes(code));
+    if(found && (!best || found.length>best.length)) best=found;
+  });
+  return best;
 }
-
 function findTextScanHits(raw){
-  const fixture = findBestFixtureCodeInTextWeb(raw);
-  const hiddenBest = findBestKnownCodeUltraWeb(buildCurrentHiddenPartCodes(), raw);
-  const mat = getMateriel(state.wallFolder);
-  const pl = expandPlacementsForDisplay(getPlacements(state.wallFolder));
+  const pl=expandPlacementsForDisplay(getPlacements(state.wallFolder));
+  const mat=getMateriel(state.wallFolder);
   const byZone = zid => pl.find(p=>String(p.trayId||'').toUpperCase()===String(zid||'').toUpperCase());
 
+  const fixture = findBestFixtureCodeInTextAndroidWeb(raw);
   if(fixture){
     const zones = getZones(state.wallFolder)
-      .map(z=>({zid:String(z.id||'').toUpperCase(), code:normalizeCodeStrict(trayCodeFor(state.wallFolder,z.id) || z.fixtureCode || z.code || z.partCode)}))
+      .map(z=>({zid:String(z.id||'').toUpperCase(), code:normalizeCodeStrict(trayCodeFor(state.wallFolder,z.id)||z.fixtureCode||z.code||z.partCode||'')}))
       .filter(x=>x.zid && x.code===fixture);
     const hits = zones.map(x=>{
       const firstPl = byZone(x.zid);
@@ -745,16 +545,15 @@ function findTextScanHits(raw){
         etage:firstPl?.etage ?? 1,
         position:firstPl?._displayPosStart ?? firstPl?.position ?? null,
         _displayPosEnd:firstPl?._displayPosEnd ?? firstPl?.position ?? null,
-        _targetCode:fixture,
         partCode:fixture,
+        _targetCode:fixture,
         _score:20000 + fixture.length
       };
     });
-    hits.sort((a,b)=>String(a.trayId).localeCompare(String(b.trayId)));
-    if(hits.length) return hits;
+    if(hits.length) return hits.sort((a,b)=>String(a.trayId).localeCompare(String(b.trayId)));
   }
 
-  const bestMat = findBestWallMaterialCodeInTextWeb(raw);
+  const bestMat = findBestMaterialCodeInTextAndroidWeb(raw);
   if(bestMat){
     const zoneIds = Array.from(new Set(mat
       .filter(it=>normalizeCodeStrict(it.partCode)===bestMat)
@@ -774,11 +573,11 @@ function findTextScanHits(raw){
         _score:15000 + bestMat.length
       };
     });
-    hits.sort((a,b)=>String(a.trayId).localeCompare(String(b.trayId)));
-    if(hits.length) return hits;
+    if(hits.length) return hits.sort((a,b)=>String(a.trayId).localeCompare(String(b.trayId)));
   }
 
-  if(hiddenBest && APK_HIDDEN_PARTS[hiddenBest]){
+  const hiddenBest = findBestHiddenPartCodeAndroidWeb(raw);
+  if(hiddenBest && typeof APK_HIDDEN_PARTS!=='undefined' && APK_HIDDEN_PARTS[hiddenBest]){
     const zoneIds = Array.from(new Set((APK_HIDDEN_PARTS[hiddenBest]||[]).map(z=>String(z||'').toUpperCase()).filter(Boolean)));
     const hits = zoneIds.map(zid=>{
       const firstPl = byZone(zid);
@@ -793,13 +592,11 @@ function findTextScanHits(raw){
         _score:14500 + hiddenBest.length
       };
     });
-    hits.sort((a,b)=>String(a.trayId).localeCompare(String(b.trayId)));
-    if(hits.length) return hits;
+    if(hits.length) return hits.sort((a,b)=>String(a.trayId).localeCompare(String(b.trayId)));
   }
 
   return [];
 }
-
 async function ensureApkSeedData(){
   const db = loadDB();
   const hasWalls = Array.isArray(db.walls) && db.walls.length>0;
@@ -1739,16 +1536,15 @@ function openTextScanner() {
       const z=first.trayId||first.zoneId;
       const start=first._displayPosStart||first.position;
       const end=first._displayPosEnd||first.position;
-      const codeShown=String(first.partCode||first._targetCode||code||'');
-      showMurBadge(start!=null ? ('Emplacement '+z+': Étage '+(first.etage||1)+' Pos '+start+(end>start?' à '+end:'')+(first.facings?(' Fac '+first.facings):'')) : ('Emplacement '+z+': Code '+codeShown), true);
-      return {
-        found:true,
-        keepOpen:true,
-        liveText:(start!=null ? ('Code '+codeShown+' → '+z+' • Étage '+(first.etage||1)+' • Pos '+start+(end>start?' à '+end:'')) : ('Code '+codeShown+' → '+z)),
-        popup:{zone:z, etage:(first.etage!=null?first.etage:'-'), position:(start!=null ? String(start)+(end>start?' à '+end:'') : '-'), extra:codeShown}
-      };
+      const detail = start!=null ? ('Position '+start+(end>start?' à '+end:'')+' • Étage '+(first.etage||1)) : ('Code '+String(first.partCode||first._targetCode||''));
+      showMurBadge(start!=null ? ('Emplacement '+z+': Étage '+(first.etage||1)+' Pos '+start+(end>start?' à '+end:'')+(first.facings?(' Fac '+first.facings):'')) : ('Emplacement '+z+': Code '+String(first.partCode||first._targetCode||'')), true);
+      return {found:true, popup:{zone:z, etage:(first.etage!=null?first.etage:'-'), position:(start!=null ? String(start)+(end>start?' à '+end:'') : '-'), extra:(first.partCode||first._targetCode||'')}};
     }
-    return {notFound:true, keepOpen:true, message:'Lecture caméra…'};
+    murHighlighted=new Set();
+    murHighlightDetails={};
+    scheduleMurDraw();
+    showMurBadge('CODE NON TROUVÉ', false);
+    return {notFound:true, message:'CODE NON TROUVÉ'};
   });
 }
 
@@ -3286,207 +3082,6 @@ let _flashTrack=null;
 let _scannerStream=null;
 let _scannerLoopToken=0;
 let _ocrBusy=false, _ocrWorker=null;
-let _ocrWorkerMode='';
-
-function captureGuideRegion(videoEl, padX=1.0, padY=1.0){
-  const guide=document.querySelector('.scanner-guide');
-  const vr=videoEl.getBoundingClientRect();
-  if(!guide || !vr.width || !vr.height || !(videoEl.videoWidth||0) || !(videoEl.videoHeight||0)){
-    return null;
-  }
-  const gr=guide.getBoundingClientRect();
-  const vw=videoEl.videoWidth||1280, vh=videoEl.videoHeight||720;
-  const scale=Math.max(vr.width/vw, vr.height/vh);
-  const shownW=vw*scale, shownH=vh*scale;
-  const offX=(shownW-vr.width)/2;
-  const offY=(shownH-vr.height)/2;
-  const dispX=((gr.left-vr.left) - (padX-1)*gr.width/2) + offX;
-  const dispY=((gr.top-vr.top) - (padY-1)*gr.height/2) + offY;
-  const dispW=gr.width*padX;
-  const dispH=gr.height*padY;
-  const sx=Math.max(0, Math.min(vw-1, Math.round(dispX/scale)));
-  const sy=Math.max(0, Math.min(vh-1, Math.round(dispY/scale)));
-  const sw=Math.max(80, Math.min(vw-sx, Math.round(dispW/scale)));
-  const sh=Math.max(40, Math.min(vh-sy, Math.round(dispH/scale)));
-  const canvas=document.createElement('canvas');
-  canvas.width=sw; canvas.height=sh;
-  const ctx=canvas.getContext('2d', {willReadFrequently:true});
-  ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, sw, sh);
-  return canvas;
-}
-function captureVideoRegion(videoEl, widthRatio, heightRatio, centerX=0.5, centerY=0.5){
-  const guided=captureGuideRegion(videoEl, widthRatio/0.8, heightRatio/0.28);
-  if(guided) return guided;
-  const vw=videoEl.videoWidth||1280, vh=videoEl.videoHeight||720;
-  const cropW=Math.max(120, Math.round(vw*Math.min(0.95, Math.max(0.2, widthRatio||0.8))));
-  const cropH=Math.max(60, Math.round(vh*Math.min(0.8, Math.max(0.1, heightRatio||0.25))));
-  const sx=Math.max(0, Math.min(vw-cropW, Math.round((vw*centerX) - cropW/2)));
-  const sy=Math.max(0, Math.min(vh-cropH, Math.round((vh*centerY) - cropH/2)));
-  const canvas=document.createElement('canvas');
-  canvas.width=cropW; canvas.height=cropH;
-  const ctx=canvas.getContext('2d', {willReadFrequently:true});
-  ctx.drawImage(videoEl, sx, sy, cropW, cropH, 0, 0, cropW, cropH);
-  return canvas;
-}
-function upscaleCanvas(src, scale){
-  const out=document.createElement('canvas');
-  out.width=Math.max(1, Math.round(src.width*(scale||2)));
-  out.height=Math.max(1, Math.round(src.height*(scale||2)));
-  const ctx=out.getContext('2d', {willReadFrequently:true});
-  ctx.imageSmoothingEnabled=false;
-  ctx.drawImage(src, 0, 0, out.width, out.height);
-  return out;
-}
-function grayContrastCanvas(src, thresholdMode=false){
-  const out=upscaleCanvas(src, 2);
-  const ctx=out.getContext('2d', {willReadFrequently:true});
-  const img=ctx.getImageData(0,0,out.width,out.height);
-  const d=img.data;
-  let sum=0, count=0;
-  for(let i=0;i<d.length;i+=4){
-    const y=(d[i]*0.299)+(d[i+1]*0.587)+(d[i+2]*0.114);
-    sum+=y; count++;
-  }
-  const avg=count?sum/count:128;
-  const thr=Math.max(90, Math.min(180, avg*0.96));
-  for(let i=0;i<d.length;i+=4){
-    let y=(d[i]*0.299)+(d[i+1]*0.587)+(d[i+2]*0.114);
-    y=(y-128)*1.9 + 128;
-    y=Math.max(0, Math.min(255, y));
-    if(thresholdMode){
-      y = y >= thr ? 255 : 0;
-    }
-    d[i]=d[i+1]=d[i+2]=y;
-    d[i+3]=255;
-  }
-  ctx.putImageData(img,0,0);
-  return out;
-}
-function sharpenCanvas(src){
-  const out=grayContrastCanvas(src, false);
-  const ctx=out.getContext('2d', {willReadFrequently:true});
-  const img=ctx.getImageData(0,0,out.width,out.height);
-  const srcData=img.data.slice();
-  const d=img.data;
-  const w=out.width, h=out.height;
-  const getY=(x,y)=>{
-    const idx=(y*w+x)*4;
-    return srcData[idx];
-  };
-  for(let y=1;y<h-1;y++){
-    for(let x=1;x<w-1;x++){
-      const idx=(y*w+x)*4;
-      const val=(5*getY(x,y))-getY(x-1,y)-getY(x+1,y)-getY(x,y-1)-getY(x,y+1);
-      const v=Math.max(0, Math.min(255, val));
-      d[idx]=d[idx+1]=d[idx+2]=v;
-      d[idx+3]=255;
-    }
-  }
-  ctx.putImageData(img,0,0);
-  return out;
-}
-function invertCanvas(src){
-  const out=document.createElement('canvas');
-  out.width=src.width; out.height=src.height;
-  const ctx=out.getContext('2d', {willReadFrequently:true});
-  ctx.drawImage(src,0,0);
-  const img=ctx.getImageData(0,0,out.width,out.height);
-  const d=img.data;
-  for(let i=0;i<d.length;i+=4){
-    d[i]=255-d[i];
-    d[i+1]=255-d[i+1];
-    d[i+2]=255-d[i+2];
-    d[i+3]=255;
-  }
-  ctx.putImageData(img,0,0);
-  return out;
-}
-function normalizeLightingCanvas(src){
-  const out=upscaleCanvas(src, 2.6);
-  const ctx=out.getContext('2d', {willReadFrequently:true});
-  const img=ctx.getImageData(0,0,out.width,out.height);
-  const d=img.data;
-  let min=255,max=0;
-  for(let i=0;i<d.length;i+=4){
-    const y=(d[i]*0.299)+(d[i+1]*0.587)+(d[i+2]*0.114);
-    if(y<min) min=y;
-    if(y>max) max=y;
-  }
-  const span=Math.max(1,max-min);
-  for(let i=0;i<d.length;i+=4){
-    let y=(d[i]*0.299)+(d[i+1]*0.587)+(d[i+2]*0.114);
-    y=((y-min)/span)*255;
-    y=(y-128)*2.2 + 128;
-    y=Math.max(0,Math.min(255,y));
-    d[i]=d[i+1]=d[i+2]=y;
-    d[i+3]=255;
-  }
-  ctx.putImageData(img,0,0);
-  return out;
-}
-
-function buildTextOcrCanvases(videoEl){
-  const ultraTight=captureGuideRegion(videoEl, 0.84, 0.70) || captureVideoRegion(videoEl, 0.52, 0.10, 0.5, 0.5);
-  const guideTight=captureGuideRegion(videoEl, 0.94, 0.82) || captureVideoRegion(videoEl, 0.58, 0.13, 0.5, 0.5);
-  const guideBase=captureGuideRegion(videoEl, 1.02, 0.94) || captureVideoRegion(videoEl, 0.70, 0.17, 0.5, 0.5);
-  const norm=normalizeLightingCanvas(guideBase);
-  const tightBinary=grayContrastCanvas(guideTight, true);
-  const ultraBinary=grayContrastCanvas(ultraTight, true);
-  const sharp=sharpenCanvas(guideTight);
-  return [
-    {canvas:upscaleCanvas(ultraTight, 4.6), psm:13},
-    {canvas:upscaleCanvas(guideTight, 4.0), psm:7},
-    {canvas:norm, psm:7},
-    {canvas:tightBinary, psm:8},
-    {canvas:ultraBinary, psm:8},
-    {canvas:sharp, psm:6}
-  ];
-}
-
-function buildUpcOcrCanvases(videoEl){
-  const base=captureGuideRegion(videoEl, 1.18, 1.25) || captureVideoRegion(videoEl, 0.80, 0.24, 0.5, 0.5);
-  return [
-    {canvas:upscaleCanvas(base, 2.8), psm:7},
-    {canvas:grayContrastCanvas(base, true), psm:7},
-    {canvas:invertCanvas(grayContrastCanvas(base, true)), psm:7},
-  ];
-}
-async function ocrRecognizeVariant(worker, variant, whitelist){
-  const psm=variant && variant.psm ? variant.psm : 7;
-  await worker.setParameters({
-    tessedit_pageseg_mode: psm,
-    tessedit_char_whitelist: whitelist,
-    preserve_interword_spaces: whitelist.includes(' ') ? '1' : '0',
-    user_defined_dpi: '400'
-  });
-  return worker.recognize(variant.canvas || variant);
-}
-async function ensureOcrWorker(mode){
-  if(!window.Tesseract) return null;
-  if(!_ocrWorker){
-    _ocrWorker = await Tesseract.createWorker('eng');
-    _ocrWorkerMode='';
-  }
-  if(_ocrWorkerMode !== mode){
-    if(mode === 'text'){
-      await _ocrWorker.setParameters({
-        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-        tessedit_pageseg_mode: 7,
-        preserve_interword_spaces: '0',
-        user_defined_dpi: '450'
-      });
-    }else{
-      await _ocrWorker.setParameters({
-        tessedit_char_whitelist: '0123456789',
-        tessedit_pageseg_mode: 7,
-        preserve_interword_spaces: '0',
-        user_defined_dpi: '300'
-      });
-    }
-    _ocrWorkerMode = mode;
-  }
-  return _ocrWorker;
-}
 
 async function startScanner(mode, callback) {
   _scannerMode=mode;
@@ -3496,7 +3091,6 @@ async function startScanner(mode, callback) {
   document.getElementById('scanner-result').style.color='#fff';
   document.getElementById('scanner-result').textContent=mode==='text'?'Lecture caméra…':'Pointez la caméra vers le code UPC…';
   document.getElementById('scanner-overlay').classList.add('open');
-  window._ocrTextHistory = [];
 
   try {
     if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
@@ -3504,24 +3098,12 @@ async function startScanner(mode, callback) {
     }
 
     const videoEl=document.getElementById('scanner-video');
-    const constraints={video:{facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30,min:24}}, audio:false};
+    const constraints={video:{facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720}}, audio:false};
     _scannerStream = await navigator.mediaDevices.getUserMedia(constraints);
     videoEl.srcObject=_scannerStream;
     await videoEl.play().catch(()=>{});
     const tracks=_scannerStream.getVideoTracks();
-    try{
-      if(tracks[0]?.applyConstraints){
-        const caps=tracks[0].getCapabilities?tracks[0].getCapabilities():{};
-        const advanced=[{focusMode:'continuous'}];
-        if(caps.exposureMode) advanced.push({exposureMode:'continuous'});
-        if(caps.whiteBalanceMode) advanced.push({whiteBalanceMode:'continuous'});
-        if(caps.zoom && typeof caps.zoom.max==='number'){
-          const z=Math.max(caps.zoom.min||1, Math.min(caps.zoom.max, 1.35));
-          advanced.push({zoom:z});
-        }
-        await tracks[0].applyConstraints({advanced});
-      }
-    }catch(e){}
+    try{ if(tracks[0]?.applyConstraints) await tracks[0].applyConstraints({advanced:[{focusMode:'continuous'}]}); }catch(e){}
     if(tracks.length) _flashTrack=tracks[0];
     const flashBtn=document.getElementById('scanner-flash-btn');
     if(flashBtn){
@@ -3543,72 +3125,76 @@ async function startScanner(mode, callback) {
       }
       if(result && result.found){
         document.getElementById('scanner-result').style.color='#fff';
-        document.getElementById('scanner-result').textContent=result.liveText || ('✅ '+text);
-        if(!result.keepOpen) closeScanner();
+        document.getElementById('scanner-result').textContent='✅ '+text;
+        closeScanner();
       }else if(result && result.notFound){
-        document.getElementById('scanner-result').style.color=result.keepOpen ? '#fff' : '#ff5252';
+        document.getElementById('scanner-result').style.color='#ff5252';
         document.getElementById('scanner-result').textContent=result.message || ((mode==='upc'?'UPC':'CODE')+' NON TROUVÉ');
-        if(!result.keepOpen){}
       }
     };
 
-
-    
-if(mode==='text'){
+    if(mode==='text'){
       const loopToken=_scannerLoopToken;
-      let lastEmitKey = '';
-      let lastEmitAt = 0;
+      const canvas=document.createElement('canvas');
+      const ctx=canvas.getContext('2d', {willReadFrequently:true});
+      let lastSeen='';
+      let lastAt=0;
+      const prepareVariant=(sourceCanvas, invert=false)=>{
+        const out=document.createElement('canvas');
+        out.width=sourceCanvas.width*2; out.height=sourceCanvas.height*2;
+        const octx=out.getContext('2d', {willReadFrequently:true});
+        octx.drawImage(sourceCanvas, 0, 0, out.width, out.height);
+        const img=octx.getImageData(0,0,out.width,out.height);
+        const d=img.data;
+        for(let i=0;i<d.length;i+=4){
+          const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+          const v = invert ? (g<150?255:0) : (g>145?255:0);
+          d[i]=d[i+1]=d[i+2]=v;
+        }
+        octx.putImageData(img,0,0);
+        return out;
+      };
       const ocrLoop = async()=>{
         if(!_scannerRunning || loopToken!==_scannerLoopToken) return;
         if(_ocrBusy || videoEl.readyState<2){
-          setTimeout(ocrLoop, 90);
+          setTimeout(ocrLoop, 180);
           return;
         }
         try{
           _ocrBusy=true;
-          const worker = await ensureOcrWorker('text');
-          if(worker){
-            const variants = buildTextOcrCanvases(videoEl).slice(0, 5);
-            const seenTexts = [];
-            window._ocrTextHistory = window._ocrTextHistory || [];
+          const vw=videoEl.videoWidth||1280, vh=videoEl.videoHeight||720;
+          const cropW=Math.round(vw*0.76), cropH=Math.round(vh*0.20);
+          const sx=Math.round((vw-cropW)/2), sy=Math.round((vh-cropH)/2);
+          canvas.width=cropW; canvas.height=cropH;
+          ctx.drawImage(videoEl, sx, sy, cropW, cropH, 0, 0, cropW, cropH);
+          if(window.Tesseract){
+            if(!_ocrWorker){
+              _ocrWorker = await Tesseract.createWorker('eng');
+              await _ocrWorker.setParameters({
+                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+                tessedit_pageseg_mode: 7,
+                preserve_interword_spaces: '0',
+                user_defined_dpi: '350'
+              });
+            }
+            const variants=[canvas, prepareVariant(canvas,false), prepareVariant(canvas,true)];
+            let bestRaw='';
             for(const variant of variants){
-              const {data} = await ocrRecognizeVariant(worker, variant, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789');
+              const {data} = await _ocrWorker.recognize(variant);
               const rawText = String(data?.text||'').trim().toUpperCase();
-              const conf = Number(data?.confidence||0);
-              const wordTexts = Array.isArray(data?.words) ? data.words.map(w=>String(w?.text||'').trim().toUpperCase()).filter(Boolean) : [];
-              const lineTexts = Array.isArray(data?.lines) ? data.lines.map(l=>String(l?.text||'').trim().toUpperCase()).filter(Boolean) : [];
-              const localTexts = [rawText, ...lineTexts, ...wordTexts].filter(Boolean);
-              if(conf >= 8 || localTexts.length){
-                localTexts.forEach(t=>seenTexts.push(t));
-              }
+              const cleaned = normalizeCodeStrict(rawText);
+              if(cleaned.length > normalizeCodeStrict(bestRaw).length) bestRaw = rawText;
+              if(findTextScanHits(rawText).length) { bestRaw = rawText; break; }
             }
-            const mergedText = seenTexts.join(' ').trim();
-            if(mergedText){
-              window._ocrTextHistory.push(mergedText);
-              if(window._ocrTextHistory.length > 8) window._ocrTextHistory.shift();
-            }
-            const corpusParts = [...window._ocrTextHistory.slice(-4)];
-            if(mergedText) corpusParts.push(mergedText);
-            const fullCorpus = corpusParts.join(' ').trim();
-            const hits = fullCorpus ? findTextScanHits(fullCorpus) : [];
-            if(hits.length){
-              const first = hits[0];
-              const codeShown = String(first.partCode || first._targetCode || '').toUpperCase();
-              const z = String(first.trayId || first.zoneId || '').toUpperCase();
-              const startPos = first._displayPosStart || first.position;
-              document.getElementById('scanner-result').style.color='#fff';
-              document.getElementById('scanner-result').textContent = codeShown ? ('Code '+codeShown+' → '+z) : ('Emplacement '+z);
-              const emitKey = z+'|'+codeShown;
+            const preview = normalizeCodeStrict(bestRaw).slice(0,28);
+            document.getElementById('scanner-result').style.color='#fff';
+            document.getElementById('scanner-result').textContent = preview ? ('Texte: '+preview) : 'Lecture caméra…';
+            if(bestRaw){
               const now=Date.now();
-              if(!emitKey || emitKey!==lastEmitKey || (now-lastEmitAt)>700){
-                lastEmitKey = emitKey;
-                lastEmitAt = now;
-                done(fullCorpus);
+              if(bestRaw!==lastSeen || (now-lastAt)>700){
+                lastSeen=bestRaw; lastAt=now;
+                done(bestRaw);
               }
-            }else{
-              const preview = normalizeTextProbe(mergedText).slice(0,40);
-              document.getElementById('scanner-result').style.color='#fff';
-              document.getElementById('scanner-result').textContent = preview ? ('Texte: '+preview) : 'Lecture caméra…';
             }
           } else {
             document.getElementById('scanner-result').textContent='OCR indisponible';
@@ -3618,7 +3204,7 @@ if(mode==='text'){
         }finally{
           _ocrBusy=false;
         }
-        setTimeout(ocrLoop, 110);
+        setTimeout(ocrLoop, 320);
       };
       ocrLoop();
       return;
@@ -3626,23 +3212,27 @@ if(mode==='text'){
 
     const startUpcOcrFallback = ()=>{
       const loopToken=_scannerLoopToken;
+      const canvas=document.createElement('canvas');
+      const ctx=canvas.getContext('2d', {willReadFrequently:true});
       const upcOcrLoop = async()=>{
         if(!_scannerRunning || loopToken!==_scannerLoopToken || mode!=='upc') return;
-        if(_ocrBusy || videoEl.readyState<2){ setTimeout(upcOcrLoop, 1000); return; }
+        if(_ocrBusy || videoEl.readyState<2){ setTimeout(upcOcrLoop, 900); return; }
         try{
           _ocrBusy=true;
-          const worker = await ensureOcrWorker('upc');
-          if(worker){
-            const variants = buildUpcOcrCanvases(videoEl);
-            for(const variant of variants){
-              const {data} = await ocrRecognizeVariant(worker, variant, '0123456789');
-              const best = pickBestUpcCandidate(data?.text||'');
-              if(/^\d{8,14}$/.test(best||'')){
-                document.getElementById('scanner-result').style.color='#fff';
-                document.getElementById('scanner-result').textContent='UPC: '+best;
-                done(best);
-                return;
-              }
+          const vw=videoEl.videoWidth||1280, vh=videoEl.videoHeight||720;
+          const cropW=Math.round(vw*0.78), cropH=Math.round(vh*0.26);
+          const sx=Math.round((vw-cropW)/2), sy=Math.round((vh-cropH)/2);
+          canvas.width=cropW; canvas.height=cropH;
+          ctx.drawImage(videoEl, sx, sy, cropW, cropH, 0, 0, cropW, cropH);
+          if(window.Tesseract){
+            if(!_ocrWorker) _ocrWorker = await Tesseract.createWorker('eng');
+            const {data} = await _ocrWorker.recognize(canvas);
+            const best = pickBestUpcCandidate(data?.text||'');
+            if(/^\d{8,14}$/.test(best||'')){
+              document.getElementById('scanner-result').style.color='#fff';
+              document.getElementById('scanner-result').textContent='UPC: '+best;
+              done(best);
+              return;
             }
           }
         }catch(err){
@@ -3650,9 +3240,9 @@ if(mode==='text'){
         }finally{
           _ocrBusy=false;
         }
-        setTimeout(upcOcrLoop, 1300);
+        setTimeout(upcOcrLoop, 1200);
       };
-      setTimeout(upcOcrLoop, 1300);
+      setTimeout(upcOcrLoop, 1200);
     };
     startUpcOcrFallback();
 
