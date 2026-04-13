@@ -507,25 +507,105 @@ function buildFixturePrefixIndex(codes){
   });
   return byPrefix;
 }
+const OCR_CONFUSION_GROUPS = ['0OQD','1ILT','2Z','5S','6G','8B','4A','7T','9G'];
+function ocrSubstitutionCost(a,b){
+  if(a===b) return 0;
+  for(const g of OCR_CONFUSION_GROUPS){ if(g.includes(a) && g.includes(b)) return 0.22; }
+  const aDigit=/[0-9]/.test(a), bDigit=/[0-9]/.test(b);
+  if(aDigit && bDigit) return 0.78;
+  if(!aDigit && !bDigit) return 0.92;
+  return 1.08;
+}
+function weightedEditDistanceOcr(a,b){
+  const s=normalizeCodeStrict(a), t=normalizeCodeStrict(b);
+  const m=s.length, n=t.length;
+  if(!m) return n;
+  if(!n) return m;
+  const dp=Array.from({length:m+1},()=>Array(n+1).fill(0));
+  for(let i=0;i<=m;i++) dp[i][0]=i;
+  for(let j=0;j<=n;j++) dp[0][j]=j;
+  for(let i=1;i<=m;i++){
+    for(let j=1;j<=n;j++){
+      const sub=dp[i-1][j-1]+ocrSubstitutionCost(s[i-1], t[j-1]);
+      const del=dp[i-1][j]+1;
+      const ins=dp[i][j-1]+1;
+      dp[i][j]=Math.min(sub, del, ins);
+    }
+  }
+  return dp[m][n];
+}
+function buildOcrHaystacks(rawText){
+  const raw=String(rawText||'');
+  const tokens=tokenizeAlnum(raw).map(normalizeCodeStrict).filter(Boolean);
+  const cleaned=normalizeCodeStrict(raw);
+  const set=new Set(tokens);
+  if(cleaned) set.add(cleaned);
+  return Array.from(set).filter(Boolean);
+}
+function scoreKnownCodeAgainstHaystack(codeRaw, hayRaw){
+  const code=normalizeCodeStrict(codeRaw), hay=normalizeCodeStrict(hayRaw);
+  if(!code || !hay || hay.length < Math.max(3, code.length-2)) return -1e9;
+  if(hay.includes(code)){
+    const idx=hay.indexOf(code);
+    return 20000 + code.length*140 - idx;
+  }
+  let best=-1e9;
+  const minLen=Math.max(3, code.length-2);
+  const maxLen=Math.min(hay.length, code.length+3);
+  for(let start=0; start<hay.length; start++){
+    for(let L=minLen; L<=maxLen && start+L<=hay.length; L++){
+      const sub=hay.slice(start, start+L);
+      const dist=weightedEditDistanceOcr(code, sub);
+      const threshold = code.length>=12 ? 2.6 : code.length>=8 ? 1.9 : 1.35;
+      if(dist > threshold) continue;
+      let score = 12000 + code.length*120 - dist*520 - start*2 - Math.abs(sub.length-code.length)*70;
+      const headA=code.slice(0, Math.min(3, code.length));
+      const headB=sub.slice(0, Math.min(3, sub.length));
+      score += Math.max(0, 300 - weightedEditDistanceOcr(headA, headB)*140);
+      if(score > best) best = score;
+    }
+  }
+  return best;
+}
+function findBestKnownCodeApproxWeb(knownCodesRaw, rawText){
+  const known = Array.from(new Set((knownCodesRaw||[])
+    .map(v=>normalizeCodeStrict(v))
+    .filter(v=>v.length >= 3 && v.length <= 20)));
+  if(!known.length) return null;
+  const haystacks = buildOcrHaystacks(rawText);
+  if(!haystacks.length) return null;
+  let bestCode=null, bestScore=-1e9;
+  const sortedKnown=known.slice().sort((a,b)=>b.length-a.length);
+  for(const code of sortedKnown){
+    for(const hay of haystacks){
+      const score=scoreKnownCodeAgainstHaystack(code, hay);
+      if(score>bestScore){ bestScore=score; bestCode=code; }
+    }
+  }
+  return bestScore >= 12100 ? bestCode : null;
+}
 function findBestFixtureCodeInTextWeb(codeOrText){
   const scanned = normalizeCodeStrict(codeOrText);
-  if(!scanned) return null;
-  const tokens = scanned.match(/[A-Z]{3}[0-9]{4,16}/g) || [];
-  if(!tokens.length) return null;
-  const byPrefix = buildFixturePrefixIndex(buildCurrentWallFixtureCodes());
-  let best = null;
-  tokens.forEach(token=>{
-    if(token.length < 7) return;
-    const candidates = byPrefix[token.slice(0,3)] || [];
-    const found = candidates.find(code=>token.includes(code));
-    if(found && (!best || found.length > best.length)) best = found;
-  });
-  return best;
+  if(scanned){
+    const tokens = scanned.match(/[A-Z]{3}[0-9]{4,16}/g) || [];
+    if(tokens.length){
+      const byPrefix = buildFixturePrefixIndex(buildCurrentWallFixtureCodes());
+      let best = null;
+      tokens.forEach(token=>{
+        if(token.length < 7) return;
+        const candidates = byPrefix[token.slice(0,3)] || [];
+        const found = candidates.find(code=>token.includes(code));
+        if(found && (!best || found.length > best.length)) best = found;
+      });
+      if(best) return best;
+    }
+  }
+  return findBestKnownCodeApproxWeb(buildCurrentWallFixtureCodes(), codeOrText);
 }
 function findBestKnownCodeInTextInternalWeb(knownCodesRaw, scannedNormalized, rawText){
   const known = Array.from(new Set((knownCodesRaw||[])
     .map(v=>normalizeCodeStrict(v))
-    .filter(v=>v.length >= 2 && v.length <= 10)));
+    .filter(v=>v.length >= 2 && v.length <= 20)));
   if(!known.length) return null;
   const tokens = rawText ? tokenizeAlnum(rawText) : [];
   const sortedKnown = known.slice().sort((a,b)=>b.length-a.length);
@@ -548,7 +628,9 @@ function findBestKnownCodeInTextInternalWeb(knownCodesRaw, scannedNormalized, ra
     if(found && (!best || found.length > best.length)) best = found;
   }
   if(best) return best;
-  return bestIn(scannedNormalized);
+  const exact = bestIn(scannedNormalized);
+  if(exact) return exact;
+  return findBestKnownCodeApproxWeb(known, rawText || scannedNormalized || '');
 }
 function findBestWallMaterialCodeInTextWeb(text){
   const raw = String(text||'').toUpperCase();
@@ -3094,7 +3176,35 @@ let _scannerLoopToken=0;
 let _ocrBusy=false, _ocrWorker=null;
 let _ocrWorkerMode='';
 
+function captureGuideRegion(videoEl, padX=1.0, padY=1.0){
+  const guide=document.querySelector('.scanner-guide');
+  const vr=videoEl.getBoundingClientRect();
+  if(!guide || !vr.width || !vr.height || !(videoEl.videoWidth||0) || !(videoEl.videoHeight||0)){
+    return null;
+  }
+  const gr=guide.getBoundingClientRect();
+  const vw=videoEl.videoWidth||1280, vh=videoEl.videoHeight||720;
+  const scale=Math.max(vr.width/vw, vr.height/vh);
+  const shownW=vw*scale, shownH=vh*scale;
+  const offX=(shownW-vr.width)/2;
+  const offY=(shownH-vr.height)/2;
+  const dispX=((gr.left-vr.left) - (padX-1)*gr.width/2) + offX;
+  const dispY=((gr.top-vr.top) - (padY-1)*gr.height/2) + offY;
+  const dispW=gr.width*padX;
+  const dispH=gr.height*padY;
+  const sx=Math.max(0, Math.min(vw-1, Math.round(dispX/scale)));
+  const sy=Math.max(0, Math.min(vh-1, Math.round(dispY/scale)));
+  const sw=Math.max(80, Math.min(vw-sx, Math.round(dispW/scale)));
+  const sh=Math.max(40, Math.min(vh-sy, Math.round(dispH/scale)));
+  const canvas=document.createElement('canvas');
+  canvas.width=sw; canvas.height=sh;
+  const ctx=canvas.getContext('2d', {willReadFrequently:true});
+  ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, sw, sh);
+  return canvas;
+}
 function captureVideoRegion(videoEl, widthRatio, heightRatio, centerX=0.5, centerY=0.5){
+  const guided=captureGuideRegion(videoEl, widthRatio/0.8, heightRatio/0.28);
+  if(guided) return guided;
   const vw=videoEl.videoWidth||1280, vh=videoEl.videoHeight||720;
   const cropW=Math.max(120, Math.round(vw*Math.min(0.95, Math.max(0.2, widthRatio||0.8))));
   const cropH=Math.max(60, Math.round(vh*Math.min(0.8, Math.max(0.1, heightRatio||0.25))));
@@ -3203,28 +3313,30 @@ function normalizeLightingCanvas(src){
   return out;
 }
 function buildTextOcrCanvases(videoEl){
-  const wide=captureVideoRegion(videoEl, 0.88, 0.38, 0.5, 0.5);
-  const base=captureVideoRegion(videoEl, 0.80, 0.28, 0.5, 0.5);
-  const tight=captureVideoRegion(videoEl, 0.68, 0.18, 0.5, 0.5);
-  const low=captureVideoRegion(videoEl, 0.72, 0.18, 0.5, 0.56);
-  const norm=normalizeLightingCanvas(base);
-  const sharp=sharpenCanvas(tight);
-  const binary=grayContrastCanvas(base, true);
+  const guideTight=captureGuideRegion(videoEl, 1.05, 1.00) || captureVideoRegion(videoEl, 0.68, 0.18, 0.5, 0.5);
+  const guideBase=captureGuideRegion(videoEl, 1.20, 1.15) || captureVideoRegion(videoEl, 0.80, 0.28, 0.5, 0.5);
+  const guideWide=captureGuideRegion(videoEl, 1.40, 1.35) || captureVideoRegion(videoEl, 0.90, 0.40, 0.5, 0.5);
+  const norm=normalizeLightingCanvas(guideBase);
+  const sharp=sharpenCanvas(guideTight);
+  const binary=grayContrastCanvas(guideBase, true);
+  const wideBinary=grayContrastCanvas(guideWide, true);
   return [
-    {canvas:upscaleCanvas(wide, 2.8), psm:6},
+    {canvas:upscaleCanvas(guideWide, 3.2), psm:6},
+    {canvas:upscaleCanvas(guideBase, 3.0), psm:7},
     {canvas:norm, psm:7},
-    {canvas:grayContrastCanvas(base, false), psm:7},
+    {canvas:grayContrastCanvas(guideBase, false), psm:7},
     {canvas:binary, psm:7},
     {canvas:invertCanvas(binary), psm:7},
-    {canvas:sharp, psm:8},
-    {canvas:grayContrastCanvas(low, true), psm:8},
+    {canvas:wideBinary, psm:11},
+    {canvas:sharp, psm:8}
   ];
 }
 function buildUpcOcrCanvases(videoEl){
-  const base=captureVideoRegion(videoEl, 0.80, 0.24, 0.5, 0.5);
+  const base=captureGuideRegion(videoEl, 1.18, 1.25) || captureVideoRegion(videoEl, 0.80, 0.24, 0.5, 0.5);
   return [
-    {canvas:upscaleCanvas(base, 2.4), psm:7},
+    {canvas:upscaleCanvas(base, 2.8), psm:7},
     {canvas:grayContrastCanvas(base, true), psm:7},
+    {canvas:invertCanvas(grayContrastCanvas(base, true)), psm:7},
   ];
 }
 async function ocrRecognizeVariant(worker, variant, whitelist){
@@ -3272,6 +3384,7 @@ async function startScanner(mode, callback) {
   document.getElementById('scanner-result').style.color='#fff';
   document.getElementById('scanner-result').textContent=mode==='text'?'Lecture caméra…':'Pointez la caméra vers le code UPC…';
   document.getElementById('scanner-overlay').classList.add('open');
+  window._ocrTextHistory = [];
 
   try {
     if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
@@ -3279,7 +3392,7 @@ async function startScanner(mode, callback) {
     }
 
     const videoEl=document.getElementById('scanner-video');
-    const constraints={video:{facingMode:{ideal:'environment'}, width:{ideal:2560}, height:{ideal:1440}}, audio:false};
+    const constraints={video:{facingMode:{ideal:'environment'}, width:{ideal:3840}, height:{ideal:2160}, frameRate:{ideal:30,min:15}}, audio:false};
     _scannerStream = await navigator.mediaDevices.getUserMedia(constraints);
     videoEl.srcObject=_scannerStream;
     await videoEl.play().catch(()=>{});
@@ -3344,27 +3457,37 @@ async function startScanner(mode, callback) {
             const variants = buildTextOcrCanvases(videoEl);
             const seenTexts = [];
             const scores = {};
+            window._ocrTextHistory = window._ocrTextHistory || [];
             for(const variant of variants){
               const {data} = await ocrRecognizeVariant(worker, variant, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789');
               const rawText = String(data?.text||'').trim();
               const conf = Number(data?.confidence||0);
-              if(rawText) seenTexts.push(rawText);
+              const wordTexts = Array.isArray(data?.words) ? data.words.map(w=>String(w?.text||'').trim()).filter(Boolean) : [];
+              const lineTexts = Array.isArray(data?.lines) ? data.lines.map(l=>String(l?.text||'').trim()).filter(Boolean) : [];
+              const localTexts = [rawText, ...lineTexts, ...wordTexts].filter(Boolean);
+              localTexts.forEach(t=>seenTexts.push(t));
               const merged = seenTexts.join(' ');
-              const candidate = findLikelyFixtureCandidate(merged) || findBestWallMaterialCodeInTextWeb(merged) || findLikelyFixtureCandidate(rawText) || findBestWallMaterialCodeInTextWeb(rawText);
+              const localCorpus = [merged, ...localTexts].filter(Boolean).join(' ');
+              const candidate = findBestFixtureCodeInTextWeb(localCorpus) || findBestWallMaterialCodeInTextWeb(localCorpus) || findLikelyFixtureCandidate(localCorpus);
               if(candidate){
-                scores[candidate] = (scores[candidate]||0) + Math.max(1, Math.round(conf/25)+1) + Math.max(0, candidate.length-5);
+                scores[candidate] = (scores[candidate]||0) + Math.max(1, Math.round(conf/18)+1) + Math.max(0, candidate.length-4);
               }
             }
             const mergedText = seenTexts.join(' ');
-            const fromMerged = findLikelyFixtureCandidate(mergedText) || findBestWallMaterialCodeInTextWeb(mergedText);
-            if(fromMerged) scores[fromMerged] = (scores[fromMerged]||0) + 6 + Math.max(0, fromMerged.length-5);
+            if(mergedText){
+              window._ocrTextHistory.push(mergedText);
+              if(window._ocrTextHistory.length > 6) window._ocrTextHistory.shift();
+            }
+            const historyMerged = window._ocrTextHistory.join(' ');
+            const fromMerged = findBestFixtureCodeInTextWeb(historyMerged + ' ' + mergedText) || findBestWallMaterialCodeInTextWeb(historyMerged + ' ' + mergedText) || findLikelyFixtureCandidate(historyMerged + ' ' + mergedText);
+            if(fromMerged) scores[fromMerged] = (scores[fromMerged]||0) + 9 + Math.max(0, fromMerged.length-4);
             const ranked = Object.entries(scores).sort((a,b)=>b[1]-a[1] || b[0].length-a[0].length);
             const bestCode = ranked[0]?.[0] || null;
             if(bestCode){
               stableCounts[bestCode] = (stableCounts[bestCode]||0) + 1;
               Object.keys(stableCounts).forEach(k=>{ if(k!==bestCode) stableCounts[k]=0; });
             }
-            const preview = bestCode || fromMerged || findLikelyFixtureCandidate(mergedText) || normalizeTextProbe(mergedText).slice(0,40);
+            const preview = bestCode || fromMerged || findLikelyFixtureCandidate(historyMerged + ' ' + mergedText) || normalizeTextProbe(mergedText).slice(0,40);
             document.getElementById('scanner-result').style.color='#fff';
             document.getElementById('scanner-result').textContent = preview ? ('Texte: '+preview) : 'Lecture caméra…';
             if(bestCode && bestCode !== lastCandidate && ((stableCounts[bestCode]||0) >= 2 || ranked[0]?.[1] >= 12)){
