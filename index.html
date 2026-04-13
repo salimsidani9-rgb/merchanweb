@@ -507,14 +507,14 @@ function buildFixturePrefixIndex(codes){
   });
   return byPrefix;
 }
-const OCR_CONFUSION_GROUPS = ['0OQD','1ILT','2Z','5S','6G','8B','4A','7T','9G'];
+const OCR_CONFUSION_GROUPS = ['0OQD','1ILT','2Z','5S','6G','8B','4A','7T','9G','MN','UVY','CGO'];
 function ocrSubstitutionCost(a,b){
   if(a===b) return 0;
-  for(const g of OCR_CONFUSION_GROUPS){ if(g.includes(a) && g.includes(b)) return 0.22; }
+  for(const g of OCR_CONFUSION_GROUPS){ if(g.includes(a) && g.includes(b)) return 0.16; }
   const aDigit=/[0-9]/.test(a), bDigit=/[0-9]/.test(b);
-  if(aDigit && bDigit) return 0.78;
-  if(!aDigit && !bDigit) return 0.92;
-  return 1.08;
+  if(aDigit && bDigit) return 0.62;
+  if(!aDigit && !bDigit) return 0.82;
+  return 0.96;
 }
 function weightedEditDistanceOcr(a,b){
   const s=normalizeCodeStrict(a), t=normalizeCodeStrict(b);
@@ -527,8 +527,8 @@ function weightedEditDistanceOcr(a,b){
   for(let i=1;i<=m;i++){
     for(let j=1;j<=n;j++){
       const sub=dp[i-1][j-1]+ocrSubstitutionCost(s[i-1], t[j-1]);
-      const del=dp[i-1][j]+1;
-      const ins=dp[i][j-1]+1;
+      const del=dp[i-1][j]+0.95;
+      const ins=dp[i][j-1]+0.95;
       dp[i][j]=Math.min(sub, del, ins);
     }
   }
@@ -540,39 +540,69 @@ function buildOcrHaystacks(rawText){
   const cleaned=normalizeCodeStrict(raw);
   const set=new Set(tokens);
   if(cleaned) set.add(cleaned);
+  tokens.forEach(tok=>{
+    if(tok.length>=5){
+      for(let i=0;i<tok.length;i+=Math.max(1, Math.floor(tok.length/4))){
+        set.add(tok.slice(i));
+      }
+    }
+  });
   return Array.from(set).filter(Boolean);
+}
+function generatePrefixWindows(rawText, knownCodes){
+  const cleaned=normalizeCodeStrict(rawText);
+  if(!cleaned) return [];
+  const prefixes=Array.from(new Set((knownCodes||[]).map(c=>normalizeCodeStrict(c).slice(0,3)).filter(p=>p.length===3)));
+  const lengths=Array.from(new Set((knownCodes||[]).map(c=>normalizeCodeStrict(c).length).filter(n=>n>=2))).sort((a,b)=>a-b);
+  const out=[];
+  prefixes.forEach(prefix=>{
+    let idx=cleaned.indexOf(prefix);
+    while(idx!==-1){
+      lengths.forEach(L=>{
+        for(const extra of [-2,-1,0,1,2,3]){
+          const len=L+extra;
+          if(len<4) continue;
+          const sub=cleaned.slice(idx, idx+len);
+          if(sub.length>=4) out.push(sub);
+        }
+      });
+      idx=cleaned.indexOf(prefix, idx+1);
+    }
+  });
+  out.push(cleaned);
+  return Array.from(new Set(out));
 }
 function scoreKnownCodeAgainstHaystack(codeRaw, hayRaw){
   const code=normalizeCodeStrict(codeRaw), hay=normalizeCodeStrict(hayRaw);
-  if(!code || !hay || hay.length < Math.max(3, code.length-2)) return -1e9;
+  if(!code || !hay || hay.length < Math.max(3, code.length-3)) return -1e9;
   if(hay.includes(code)){
     const idx=hay.indexOf(code);
-    return 20000 + code.length*140 - idx;
+    return 26000 + code.length*180 - idx*3 - Math.max(0, hay.length-code.length)*8;
   }
   let best=-1e9;
-  const minLen=Math.max(3, code.length-2);
-  const maxLen=Math.min(hay.length, code.length+3);
+  const minLen=Math.max(3, code.length-4);
+  const maxLen=Math.min(hay.length, code.length+4);
+  const prefix=code.slice(0,3);
   for(let start=0; start<hay.length; start++){
     for(let L=minLen; L<=maxLen && start+L<=hay.length; L++){
       const sub=hay.slice(start, start+L);
       const dist=weightedEditDistanceOcr(code, sub);
-      const threshold = code.length>=12 ? 2.6 : code.length>=8 ? 1.9 : 1.35;
+      const prefixDist=weightedEditDistanceOcr(prefix, sub.slice(0, Math.min(3, sub.length)));
+      const threshold = code.length>=12 ? 4.0 : code.length>=8 ? 3.2 : code.length>=6 ? 2.6 : 2.1;
       if(dist > threshold) continue;
-      let score = 12000 + code.length*120 - dist*520 - start*2 - Math.abs(sub.length-code.length)*70;
-      const headA=code.slice(0, Math.min(3, code.length));
-      const headB=sub.slice(0, Math.min(3, sub.length));
-      score += Math.max(0, 300 - weightedEditDistanceOcr(headA, headB)*140);
+      if(prefixDist > 1.45) continue;
+      let score = 16500 + code.length*170 - dist*700 - start*3 - Math.abs(sub.length-code.length)*100 - prefixDist*260;
+      if(sub.startsWith(prefix)) score += 520;
+      if(code.length>=7 && sub.length>=7 && sub[3]===code[3]) score += 140;
       if(score > best) best = score;
     }
   }
   return best;
 }
-function findBestKnownCodeApproxWeb(knownCodesRaw, rawText){
-  const known = Array.from(new Set((knownCodesRaw||[])
-    .map(v=>normalizeCodeStrict(v))
-    .filter(v=>v.length >= 3 && v.length <= 20)));
+function findBestKnownCodeUltraWeb(knownCodesRaw, rawText){
+  const known = Array.from(new Set((knownCodesRaw||[]).map(v=>normalizeCodeStrict(v)).filter(v=>v.length>=2 && v.length<=20)));
   if(!known.length) return null;
-  const haystacks = buildOcrHaystacks(rawText);
+  const haystacks = [...buildOcrHaystacks(rawText), ...generatePrefixWindows(rawText, known)];
   if(!haystacks.length) return null;
   let bestCode=null, bestScore=-1e9;
   const sortedKnown=known.slice().sort((a,b)=>b.length-a.length);
@@ -582,9 +612,13 @@ function findBestKnownCodeApproxWeb(knownCodesRaw, rawText){
       if(score>bestScore){ bestScore=score; bestCode=code; }
     }
   }
-  return bestScore >= 12100 ? bestCode : null;
+  return bestScore >= 14550 ? bestCode : null;
+}
+function findBestKnownCodeApproxWeb(knownCodesRaw, rawText){
+  return findBestKnownCodeUltraWeb(knownCodesRaw, rawText);
 }
 function findBestFixtureCodeInTextWeb(codeOrText){
+
   const scanned = normalizeCodeStrict(codeOrText);
   if(scanned){
     const tokens = scanned.match(/[A-Z]{3}[0-9]{4,16}/g) || [];
@@ -638,7 +672,8 @@ function findBestWallMaterialCodeInTextWeb(text){
   if(!scanned) return null;
   const items = getMateriel(state.wallFolder);
   if(!items.length) return null;
-  return findBestKnownCodeInTextInternalWeb(items.map(it=>it.partCode), scanned, raw);
+  const known=items.map(it=>it.partCode);
+  return findBestKnownCodeInTextInternalWeb(known, scanned, raw) || findBestKnownCodeUltraWeb(known, raw);
 }
 function findTextScanHits(raw){
   const fixture = findBestFixtureCodeInTextWeb(raw);
@@ -3313,22 +3348,33 @@ function normalizeLightingCanvas(src){
   return out;
 }
 function buildTextOcrCanvases(videoEl){
-  const guideTight=captureGuideRegion(videoEl, 1.05, 1.00) || captureVideoRegion(videoEl, 0.68, 0.18, 0.5, 0.5);
-  const guideBase=captureGuideRegion(videoEl, 1.20, 1.15) || captureVideoRegion(videoEl, 0.80, 0.28, 0.5, 0.5);
-  const guideWide=captureGuideRegion(videoEl, 1.40, 1.35) || captureVideoRegion(videoEl, 0.90, 0.40, 0.5, 0.5);
+  const guideTight=captureGuideRegion(videoEl, 0.98, 0.92) || captureVideoRegion(videoEl, 0.64, 0.16, 0.5, 0.5);
+  const guideBase=captureGuideRegion(videoEl, 1.10, 1.05) || captureVideoRegion(videoEl, 0.76, 0.24, 0.5, 0.5);
+  const guideWide=captureGuideRegion(videoEl, 1.28, 1.20) || captureVideoRegion(videoEl, 0.88, 0.34, 0.5, 0.5);
+  const guideHigh=captureVideoRegion(videoEl, 0.82, 0.18, 0.5, 0.42);
+  const guideLow=captureVideoRegion(videoEl, 0.82, 0.18, 0.5, 0.58);
   const norm=normalizeLightingCanvas(guideBase);
   const sharp=sharpenCanvas(guideTight);
+  const sharpWide=sharpenCanvas(guideWide);
   const binary=grayContrastCanvas(guideBase, true);
+  const tightBinary=grayContrastCanvas(guideTight, true);
   const wideBinary=grayContrastCanvas(guideWide, true);
+  const highNorm=normalizeLightingCanvas(guideHigh);
+  const lowNorm=normalizeLightingCanvas(guideLow);
   return [
-    {canvas:upscaleCanvas(guideWide, 3.2), psm:6},
-    {canvas:upscaleCanvas(guideBase, 3.0), psm:7},
+    {canvas:upscaleCanvas(guideWide, 3.6), psm:6},
+    {canvas:upscaleCanvas(guideBase, 3.4), psm:7},
+    {canvas:upscaleCanvas(guideTight, 3.8), psm:7},
     {canvas:norm, psm:7},
+    {canvas:highNorm, psm:7},
+    {canvas:lowNorm, psm:7},
     {canvas:grayContrastCanvas(guideBase, false), psm:7},
     {canvas:binary, psm:7},
-    {canvas:invertCanvas(binary), psm:7},
+    {canvas:tightBinary, psm:8},
+    {canvas:invertCanvas(tightBinary), psm:8},
     {canvas:wideBinary, psm:11},
-    {canvas:sharp, psm:8}
+    {canvas:sharp, psm:8},
+    {canvas:sharpWide, psm:13}
   ];
 }
 function buildUpcOcrCanvases(videoEl){
@@ -3483,6 +3529,7 @@ async function startScanner(mode, callback) {
             if(fromMerged) scores[fromMerged] = (scores[fromMerged]||0) + 9 + Math.max(0, fromMerged.length-4);
             const ranked = Object.entries(scores).sort((a,b)=>b[1]-a[1] || b[0].length-a[0].length);
             const bestCode = ranked[0]?.[0] || null;
+            const secondScore = ranked[1]?.[1] || 0;
             if(bestCode){
               stableCounts[bestCode] = (stableCounts[bestCode]||0) + 1;
               Object.keys(stableCounts).forEach(k=>{ if(k!==bestCode) stableCounts[k]=0; });
@@ -3490,7 +3537,7 @@ async function startScanner(mode, callback) {
             const preview = bestCode || fromMerged || findLikelyFixtureCandidate(historyMerged + ' ' + mergedText) || normalizeTextProbe(mergedText).slice(0,40);
             document.getElementById('scanner-result').style.color='#fff';
             document.getElementById('scanner-result').textContent = preview ? ('Texte: '+preview) : 'Lecture caméra…';
-            if(bestCode && bestCode !== lastCandidate && ((stableCounts[bestCode]||0) >= 2 || ranked[0]?.[1] >= 12)){
+            if(bestCode && bestCode !== lastCandidate && ((stableCounts[bestCode]||0) >= 2 || ranked[0]?.[1] >= 14 || (ranked[0]?.[1]||0) - secondScore >= 4)){
               lastCandidate = bestCode;
               done(bestCode);
               return;
